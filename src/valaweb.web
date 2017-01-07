@@ -1,0 +1,261 @@
+
+\title {Valaweb}
+
+\begin {document}
+
+\maketitle
+
+This is a tool to enable literate programming, working with vala, written in vala, self-hosting.
+
+Here's the main method, showing the program's basic structure:
+
+<<main>>=
+
+<<using>>
+<<globals>>
+
+int main (string[] argv) {
+    <<check if arguments are valid>>
+    <<read in input file>>
+    
+    <<find macros>>
+    <<build vala file>>
+    
+    <<save output>>
+    <<calling valac>>
+    
+    return 0;
+}
+
+<<other functions>>
+@
+
+We'll figure out which namespaces to use and what globals we want later.
+
+
+\section {Check if valid arguments were given}
+
+Obviously, that's quite an important step. We only want one input file (such as this one). While by convention said file ends in ".valaweb", that is by no means a requirement.
+
+<<check if arguments are valid>>=
+if (argv.length != 2) {
+    stderr.printf ("this programm takes exactly one input file!\n");
+    return 1;
+}
+@
+
+Notice that it will imeadiately terminate in case of error.
+
+
+\section {Read the input file}
+
+Now that we now there's a valid input, let's read it all and pack it into one, huge string:
+
+<<read in input file>>=
+    string raw = ""; // this will contain all the input
+    
+    File input = File.new_for_path (argv[1]);
+    <<check if input exists>>
+    
+    try {
+        <<read lines of input>>
+    } catch {
+        stderr.printf ("File Error");
+        return 1; // again, terminate in case of error
+    }
+@
+
+Reading all the input lines is basically just one loop reading line by line until the file's ended:
+
+<<read lines of input>>=
+    var dis = new DataInputStream (input.read ());
+    string line;
+    // Read lines until end of file (null) is reached
+    while ((line = dis.read_line (null)) != null) {
+        raw += "%s\n".printf (line);
+    }
+@
+
+Before we do that, of course, we need to check if any file actually exists:
+
+<<check if input exists>>=
+    if (!input.query_exists ()) {
+        stderr.printf ("Input doesn't exist!");
+        return 1;
+    }
+@
+
+
+
+
+\section {Parsing the input & finding macros in it}
+
+This is probably one of the most important parts of the program:
+
+<<find macros>>=
+    macros = new HashMap <string, string> ();
+    
+    string[] segments = raw.split (">>=\n");
+    
+    for (int i = 1; i<segments.length; i++) {
+        string[] temp = segments[i].split ("\n@\n");
+        if (temp.length == 1) {
+            stderr.printf ("Invalid Syntax (missing @)\n");
+            return 2;
+        }
+        string macro = temp[0];
+        
+        temp = segments[i-1].split ("\<\<");
+        if (temp.length == 1) {
+            stderr.printf ("Invalid Syntax!\n");
+            return 2;
+        }
+        string name = temp[temp.length - 1];
+        
+        macros [name] = macro;
+    
+    }    
+@
+
+Note that there's a different error code now, to indicate a syntactic error input rather than a file one.
+
+In it, we store all the macros (in the macros variable; this one will be declared in the <<global>> macro later on).
+
+The main parsing stuff might look a bit complicated, but it's actually simple: Take the document, split it at each macro declaration. A macro's name will be directly before it, limited by two "smaller-than"-signs. Everything that comes afterwards will be part of the macro, until an '@' is reached, with a linebreak directly before and after it.
+
+Together, all this will be stored in that global map we have yet to create.
+
+
+\section {building a vala file}
+
+The next part is tricky, as it needs to recursivly build all the macros starting at the one called 'main'. Therefore, we'll do much of it in an extra function, like this:
+
+<<build vala file>>=
+    <<doing checks and stuff>>
+    string output = build_vala ("main");
+@
+
+(Declaring that extra function will later be done in the <<other functions>> block)
+
+Here's the function itself:
+
+<<build_vala_function>>=
+string? build_vala (string macro_name) {
+     // check if the given macro actually exists
+    if (!macros.has_key (macro_name)) {
+        stdout.printf ("Macro '%s' used, but never declared\n", macro_name);
+    }
+    
+     // retrieve the macro's content and split it apart every time another macro within it begins.
+    string [] temp = macros [macro_name].split ("<"+"<");
+
+     // if there's no other macro in here, return the actual text content
+    if (temp.length == 1) {
+        return temp[0].replace ("\\\>", "\>").replace("\\\<", "\<");;
+    }
+    
+    string ret = temp[0]; // this will contain the finished code to be returned.
+    
+    for (int i = 1; i<temp.length; i++) {
+    
+        string[] t2 = temp[i].split (">"+">");
+        if (t2.length != 2) {
+            stderr.printf ("Error occured while building!");
+            return null;
+        }
+        string name = t2[0].replace ("\\\>", "\>").replace("\\\<", "\<");;
+        string code = build_vala (name);
+        if (code == null) {
+            return null;
+        }
+        ret += code;
+        ret += t2[1];
+    
+    }
+    
+    return ret;
+}
+@
+
+Note that escape sequences are in place, so "\<" will become "<" in the actual code.
+
+Of course, first we'll need to know whether or not the main macro even exists:
+
+<<doing checks and stuff>>=
+
+    if (!macros.has_key ("main")) {
+        stderr.printf ("Given input lacks a main macro!\n");
+        return 3;
+    }
+@
+
+Again, there's a different exit code, this time for valid syntax, but invalid semantics.
+
+
+\section {Saving the output}
+
+Finally, we'll need to save the generated output into a file:
+
+<<save output>>=
+    string filename;
+    <<get a nice output name>>
+    
+    try {
+        var file_out = File.new_for_path (filename);
+
+        // delete if the file already exists
+        if (file_out.query_exists ()) {
+            file_out.delete ();
+        }
+        
+        var dos = new DataOutputStream (file_out.create (FileCreateFlags.REPLACE_DESTINATION));
+        
+        dos.put_string (output); // put the whole thing out
+        
+    } catch (Error e) {
+        stderr.printf ("%s\n", e.message);
+        return 1; // this would be a file error, ergo error code 1.
+    }
+@
+
+Since neither overwriting our input file nor having a fixed output file name is a nice option, here's some code to keep the input's file name, but change the extension.
+
+<<get a nice output name>>=
+
+    string[] temp = argv[1].split(".");
+    filename = "%s.vala".printf (temp[0]);
+@
+
+This even works if, for some reason, the input \emph{lacked} and extension entirely!
+
+It will, hovever, not work with multiple dots in the input name.
+
+
+\section {calling valac}
+
+Finally, the last thing to do is to would be to call the vala compiler and give it our just-created file:
+
+<<calling valac>>=
+stdout.printf ("generated %s\n", filename);
+@
+
+
+\section {global variables and functions}
+
+<<using>>=
+using Gee;
+@
+
+<<globals>>=
+HashMap <string, string> macros;
+@
+
+<<other functions>>=
+<<build_vala_function>>
+@
+
+
+
+
+
+\end {document}
